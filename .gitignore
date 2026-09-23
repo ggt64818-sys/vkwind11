@@ -1,0 +1,15 @@
+build/
+build-android/
+.plan
+winlator-package/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.lib
+meson-logs/
+compile_commands.json
+.ninja_deps
+.ninja_log

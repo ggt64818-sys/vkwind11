@@ -1,0 +1,19 @@
+[binaries]
+c = 'C:/Users/ggt64/AppData/Local/Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd'
+cpp = 'C:/Users/ggt64/AppData/Local/Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang++.cmd'
+ar = 'C:/Users/ggt64/AppData/Local/Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe'
+strip = 'C:/Users/ggt64/AppData/Local/Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip.exe'
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'armv8-a'
+endian = 'little'
+
+[properties]
+android_ndk_path = 'C:/Users/ggt64/AppData/Local/Android/Sdk/ndk/29.0.14206865'
+android_api_level = 24
+
+[built-in options]
+cpp_std = 'c++20'
+default_library = 'shared'
