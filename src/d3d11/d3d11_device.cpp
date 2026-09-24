@@ -263,7 +263,6 @@ HRESULT D3D11Device::CreateClassLinkage(ID3D11ClassLinkage** ppLinkage) {
 }
 
 // --- Context ---
-
 void D3D11Device::GetImmediateContext(ID3D11DeviceContext** ppImmediateContext) {
   if (ppImmediateContext) {
     *ppImmediateContext = m_immediateContext;
@@ -305,3 +304,4 @@ UINT D3D11Device::CheckFormatSupport(DXGI_FORMAT Format) {
 HRESULT D3D11Device::GetDeviceRemovedReason() {
   return S_OK;
 }
+

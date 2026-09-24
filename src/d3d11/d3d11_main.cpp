@@ -65,8 +65,9 @@ HRESULT D3D11CreateDevice(
   // Create immediate context
   auto context = new D3D11DeviceContext(device);
 
-  // Store raw pointer via setter
+  // Device holds its own reference to the context
   device->setImmediateContext(context);
+  context->AddRef();
 
   *ppDevice = device;
   if (ppImmediateContext) *ppImmediateContext = context;

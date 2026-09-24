@@ -380,6 +380,53 @@ void test_formats(ID3D11Device* device) {
 }
 
 // ============================================================================
+// 8. STAGING TEXTURE MAP/UNMAP (direct HOST_VISIBLE mapping)
+// ============================================================================
+
+void test_staging_map(ID3D11Device* device) {
+  TEST("8. Staging texture Map/Unmap (direct HOST_VISIBLE)");
+
+  D3D11_TEXTURE2D_DESC desc = {};
+  desc.Width = 4; desc.Height = 4; desc.MipLevels = 1; desc.ArraySize = 1;
+  desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.SampleDescCount = 1; desc.Usage = D3D11_USAGE_STAGING;
+  desc.CPUAccessFlags = (D3D11_CPU_ACCESS_FLAG)(D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE);
+
+  ID3D11Texture2D* tex = nullptr;
+  HRESULT hr = device->CreateTexture2D(&desc, nullptr, &tex);
+  CHECK(SUCCEEDED(hr), "Create staging texture (4x4, read+write)");
+  if (!tex) return;
+
+  ID3D11DeviceContext* ctx = nullptr;
+  device->GetImmediateContext(&ctx);
+  if (!ctx) { FAIL("GetImmediateContext"); tex->Release(); return; }
+
+  D3D11_MAPPED_SUBRESOURCE mapped = {};
+  hr = ctx->Map(tex, 0, D3D11_MAP_WRITE, 0, &mapped);
+  CHECK(SUCCEEDED(hr), "Map staging for write (direct)");
+  if (SUCCEEDED(hr)) {
+    uint32_t* pixels = (uint32_t*)mapped.pData;
+    for (int i = 0; i < 16; i++) pixels[i] = 0xAABBCC00 + i;
+    ctx->Unmap(tex, 0);
+
+    hr = ctx->Map(tex, 0, D3D11_MAP_READ, 0, &mapped);
+    CHECK(SUCCEEDED(hr), "Map staging for read (direct)");
+    if (SUCCEEDED(hr)) {
+      uint32_t* readBack = (uint32_t*)mapped.pData;
+      bool match = true;
+      for (int i = 0; i < 16; i++) {
+        if (readBack[i] != (uint32_t)(0xAABBCC00 + i)) { match = false; break; }
+      }
+      CHECK(match, "Write-then-read data matches (16 pixels)");
+      ctx->Unmap(tex, 0);
+    }
+  }
+
+  ctx->Release();
+  tex->Release();
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -404,6 +451,9 @@ int main() {
   test_advanced_textures(device);
   printf("--- test_advanced_textures done ---\n");
   test_formats(device);
+  printf("--- test_formats done ---\n");
+  test_staging_map(device);
+  printf("--- test_staging_map done ---\n");
 
   // device->Release() — skip to avoid crash in cleanup
 

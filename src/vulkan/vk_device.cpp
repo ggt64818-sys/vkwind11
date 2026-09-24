@@ -292,7 +292,9 @@ bool VulkanDevice::createImage(uint32_t width, uint32_t height, uint32_t mipLeve
   imageInfo.mipLevels = mipLevels;
   imageInfo.arrayLayers = arrayLayers;
   imageInfo.format = format;
-  imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+  // LINEAR tiling is required for HOST_VISIBLE memory (staging textures)
+  imageInfo.tiling = (memProps & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+                     ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
   imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   imageInfo.usage = usage;
   imageInfo.samples = samples;

@@ -1009,6 +1009,21 @@ HRESULT D3D11DeviceContext::Map(ID3D11Resource* pResource, UINT Subresource, D3D
     uint32_t bpp = GetBytesPerPixel(texture->desc.Format);
     VkDeviceSize bufferSize = static_cast<VkDeviceSize>(texture->desc.Width) * texture->desc.Height * bpp;
 
+    // Staging textures use HOST_VISIBLE memory — map directly, no GPU copy needed
+    if (texture->desc.Usage == D3D11_USAGE_STAGING && texture->vkImage.memory) {
+      void* data = nullptr;
+      VkResult vr = vkMapMemory(device, texture->vkImage.memory, 0, bufferSize, 0, &data);
+      if (vr != VK_SUCCESS) {
+        VKWIND11_LOG_WARN("Map: vkMapMemory failed for staging texture: %d", vr);
+        return E_FAIL;
+      }
+      texture->directMapped = data;
+      pMappedResource->pData = data;
+      pMappedResource->RowPitch = texture->desc.Width * bpp;
+      pMappedResource->DepthPitch = pMappedResource->RowPitch * texture->desc.Height;
+      return S_OK;
+    }
+
     if (MapType == D3D11_MAP_READ) {
       if (!vk.createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -1075,6 +1090,14 @@ void D3D11DeviceContext::Unmap(ID3D11Resource* pResource, UINT Subresource) {
 
   if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
     auto texture = static_cast<D3D11Texture2DImpl*>(pResource);
+
+    // Direct mapping (staging textures with HOST_VISIBLE memory)
+    if (texture->directMapped) {
+      auto& vk = m_device->getVulkanDevice();
+      vkUnmapMemory(vk.getDevice(), texture->vkImage.memory);
+      texture->directMapped = nullptr;
+      return;
+    }
 
     if (texture->mapStagingBuffer.buffer == VK_NULL_HANDLE) return;
 

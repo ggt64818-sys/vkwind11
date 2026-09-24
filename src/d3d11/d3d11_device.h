@@ -136,6 +136,7 @@ public:
   VulkanImage vkImage;
   D3D11Device* device;
   VulkanBuffer mapStagingBuffer;
+  void* directMapped = nullptr; // For staging textures (HOST_VISIBLE direct map)
 };
 
 // ============================================================================
