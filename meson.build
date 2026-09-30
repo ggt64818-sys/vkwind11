@@ -1,5 +1,5 @@
 project('vkwind11', 'cpp',
-  version : '0.2.1',
+  version : '0.2.2',
   default_options : [
     'cpp_std=c++20',
     'cpp_args=-DVKWIND11_EXPORTS',

@@ -61,6 +61,38 @@ void test_texture_create(ID3D11Device* device) {
   CHECK(SUCCEEDED(hr), "CreateTexture2D (4x4 RGBA with data)");
   if (!tex) return;
 
+  // Verify initial data was uploaded by reading back via staging
+  {
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = (D3D11_BIND_FLAG)0;
+    stagingDesc.CPUAccessFlags = (D3D11_CPU_ACCESS_FLAG)D3D11_CPU_ACCESS_READ;
+
+    ID3D11Texture2D* staging = nullptr;
+    hr = device->CreateTexture2D(&stagingDesc, nullptr, &staging);
+    if (staging) {
+      ID3D11DeviceContext* ctx = nullptr;
+      device->GetImmediateContext(&ctx);
+      if (ctx) {
+        ctx->CopyResource(staging, tex);
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        hr = ctx->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
+        printf("  Map(readback): hr=0x%08lx pData=%p\n", hr, mapped.pData);
+        if (SUCCEEDED(hr)) {
+          uint8_t* bytes = (uint8_t*)mapped.pData;
+          uint32_t p0 = *(uint32_t*)(bytes + 0);
+          bool match = (p0 == pixels[0]);
+          CHECK(match, "Initial data uploaded (first pixel verify)");
+          ctx->Unmap(staging, 0);
+        } else {
+          FAIL("Map staging for initial data verify");
+        }
+        ctx->Release();
+      }
+      staging->Release();
+    }
+  }
+
   // Verify descriptor
   D3D11_TEXTURE2D_DESC gotDesc = {};
   tex->GetDesc(&gotDesc);

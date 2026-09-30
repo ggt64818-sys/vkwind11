@@ -1270,7 +1270,8 @@ void D3D11DeviceContext::CopyResource(ID3D11Resource* pDstResource, ID3D11Resour
     BeginOneShotCommands(vk, pool, cmd);
 
     TransitionImageLayout(device, cmd, srcTexture->vkImage.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    TransitionImageLayout(device, cmd, dstTexture->vkImage.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    // Destination may be freshly created (UNDEFINED) — use UNDEFINED as source layout
+    TransitionImageLayout(device, cmd, dstTexture->vkImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     VkImageCopy copyRegion{};
     copyRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};

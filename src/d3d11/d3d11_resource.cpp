@@ -196,9 +196,109 @@ D3D11Texture2DImpl::D3D11Texture2DImpl(D3D11Device* dev, const D3D11_TEXTURE2D_D
   }
 
   // Upload initial data if provided
-  if (initialData && initialData->pSysMem && vkImage.memory) {
-    // TODO: staging buffer upload for textures
-    // For now, only works if initial data is already in GPU memory
+  if (initialData && initialData->pSysMem && vkImage.image && vkImage.memory) {
+    uint32_t bpp = 4; // default RGBA8
+    switch (textureDesc->Format) {
+      case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+      case DXGI_FORMAT_R8G8B8A8_UINT: case DXGI_FORMAT_R8G8B8A8_SNORM: case DXGI_FORMAT_R8G8B8A8_SINT:
+      case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: bpp = 4; break;
+      case DXGI_FORMAT_R16G16B16A16_FLOAT: bpp = 8; break;
+      case DXGI_FORMAT_R32G32B32A32_FLOAT: bpp = 16; break;
+      case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_D32_FLOAT: bpp = 4; break;
+      case DXGI_FORMAT_R16_FLOAT: case DXGI_FORMAT_D16_UNORM: bpp = 2; break;
+      case DXGI_FORMAT_R8_UNORM: bpp = 1; break;
+      case DXGI_FORMAT_D24_UNORM_S8_UINT: bpp = 4; break;
+      default: bpp = 4; break;
+    }
+
+    VkDeviceSize imageSize = static_cast<VkDeviceSize>(textureDesc->Width) * textureDesc->Height * bpp;
+
+    // Create staging buffer, copy data, submit copy to image
+    auto& vk = device->getVulkanDevice();
+    VulkanBuffer staging;
+    if (vk.createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging)) {
+      void* mapped = nullptr;
+      if (vkMapMemory(vk.getDevice(), staging.memory, 0, imageSize, 0, &mapped) == VK_SUCCESS) {
+        // Copy with row pitch handling
+        uint32_t dstRowPitch = textureDesc->Width * bpp;
+        uint32_t srcRowPitch = initialData->SysMemPitch ? initialData->SysMemPitch : dstRowPitch;
+        if (srcRowPitch == dstRowPitch) {
+          memcpy(mapped, initialData->pSysMem, imageSize);
+        } else {
+          uint8_t* dst = static_cast<uint8_t*>(mapped);
+          const uint8_t* src = static_cast<const uint8_t*>(initialData->pSysMem);
+          for (uint32_t y = 0; y < textureDesc->Height; ++y) {
+            memcpy(dst + y * dstRowPitch, src + y * srcRowPitch, dstRowPitch);
+          }
+        }
+        vkUnmapMemory(vk.getDevice(), staging.memory);
+
+        // Submit one-shot copy command
+        VkCommandPool pool;
+        VkCommandBuffer cmd;
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        poolInfo.queueFamilyIndex = vk.getGraphicsQueueFamily();
+        vkCreateCommandPool(vk.getDevice(), &poolInfo, nullptr, &pool);
+
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = pool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+        vkAllocateCommandBuffers(vk.getDevice(), &allocInfo, &cmd);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &beginInfo);
+
+        // Transition image to TRANSFER_DST, copy, transition to SHADER_READ_ONLY
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = vkImage.image;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        VkBufferImageCopy copyRegion{};
+        copyRegion.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copyRegion.imageExtent = {textureDesc->Width, textureDesc->Height, 1};
+        vkCmdCopyBufferToImage(cmd, staging.buffer, vkImage.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+        // Transition to SHADER_READ_ONLY
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        vkEndCommandBuffer(cmd);
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &cmd;
+        vkQueueSubmit(vk.getGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(vk.getGraphicsQueue());
+
+        vkFreeCommandBuffers(vk.getDevice(), pool, 1, &cmd);
+        vkDestroyCommandPool(vk.getDevice(), pool, nullptr);
+      }
+      staging.destroy(vk.getDevice());
+    }
+    VKWIND11_LOG_INFO("Texture initial data uploaded: %ux%u, pitch=%u",
+      textureDesc->Width, textureDesc->Height, initialData->SysMemPitch);
   }
 
   VKWIND11_LOG_DEBUG("D3D11Texture2D created: %ux%u, format=%d, mip=%u, array=%u",
