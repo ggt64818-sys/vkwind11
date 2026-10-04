@@ -53,6 +53,7 @@ struct PipelineKey {
 
   // Blend
   bool blendEnable = false;
+  bool alphaToCoverage = false;
 
   // Render pass
   VkRenderPass renderPass = VK_NULL_HANDLE;

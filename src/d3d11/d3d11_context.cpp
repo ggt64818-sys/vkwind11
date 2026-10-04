@@ -986,10 +986,13 @@ void D3D11DeviceContext::bindGraphicsPipeline() {
   }
 
   // Blend state
-  if (m_blendState && static_cast<D3D11BlendState*>(m_blendState)->desc.RenderTarget[0].BlendEnable) {
-    key.blendEnable = true;
+  if (m_blendState) {
+    auto& desc = static_cast<D3D11BlendState*>(m_blendState)->desc;
+    key.blendEnable = desc.RenderTarget[0].BlendEnable != 0;
+    key.alphaToCoverage = desc.AlphaToCoverageEnable != 0;
   } else {
     key.blendEnable = false;
+    key.alphaToCoverage = false;
   }
 
   // Vertex input from input layout — fixed arrays, no heap

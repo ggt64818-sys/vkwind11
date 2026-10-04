@@ -49,6 +49,7 @@ bool PipelineKey::operator==(const PipelineKey& other) const {
   if (depthWriteEnable != other.depthWriteEnable) return false;
   if (depthCompareOp != other.depthCompareOp) return false;
   if (blendEnable != other.blendEnable) return false;
+  if (alphaToCoverage != other.alphaToCoverage) return false;
   if (renderPass != other.renderPass) return false;
   if (subpass != other.subpass) return false;
   if (numBindings != other.numBindings) return false;
@@ -85,6 +86,7 @@ size_t VulkanPipelineManager::computeKeyHash(const PipelineKey& key) const {
   combine(hash, (size_t)key.depthWriteEnable);
   combine(hash, (size_t)key.depthCompareOp);
   combine(hash, (size_t)key.blendEnable);
+  combine(hash, (size_t)key.alphaToCoverage);
   combine(hash, (size_t)key.renderPass);
   combine(hash, (size_t)key.subpass);
   combine(hash, (size_t)key.numBindings);
@@ -219,6 +221,7 @@ VkPipeline VulkanPipelineManager::createPipelineInternal(const PipelineKey& key,
   msInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
   msInfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
   msInfo.minSampleShading = 1.0f;
+  msInfo.alphaToCoverageEnable = key.alphaToCoverage ? VK_TRUE : VK_FALSE;
 
   // Depth/stencil
   VkPipelineDepthStencilStateCreateInfo dsInfo = {};
