@@ -784,6 +784,8 @@ void D3D11DeviceContext::ensureCommandBuffer() {
   beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(m_cmdBuffer, &beginInfo);
+  // New command buffer — pipeline state resets
+  m_currentPipeline = VK_NULL_HANDLE;
   VKWIND11_LOG_TRACE("ensureCommandBuffer: created new command buffer %p", m_cmdBuffer);
 }
 
@@ -1042,11 +1044,12 @@ void D3D11DeviceContext::bindGraphicsPipeline() {
     return;
   }
 
-  vkCmdBindPipeline(m_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-
-  m_currentPipeline = pipeline;
-
-  VKWIND11_LOG_TRACE("bindGraphicsPipeline: bound pipeline %p", pipeline);
+  // Skip redundant bind if pipeline unchanged (Mali optimization)
+  if (pipeline != m_currentPipeline) {
+    vkCmdBindPipeline(m_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    m_currentPipeline = pipeline;
+    VKWIND11_LOG_TRACE("bindGraphicsPipeline: bound pipeline %p", pipeline);
+  }
 }
 
 static uint32_t GetBytesPerPixel(DXGI_FORMAT format) {
