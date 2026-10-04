@@ -31,33 +31,36 @@ void D3D11DeviceContext::initDescriptors() {
   auto& vk = m_device->getVulkanDevice();
   auto dev = vk.getDevice();
 
-  // Create descriptor set layout matching pipeline layout:
+  // Descriptor set layout matching pipeline layout:
   // binding 0: UBO (vertex stage)
-  // binding 1: combined image sampler (fragment stage)
-  VkDescriptorSetLayoutBinding bindings[2] = {};
+  // binding 1-8: combined image samplers (fragment stage)
+  static constexpr uint32_t kMaxTex = 8;
+  VkDescriptorSetLayoutBinding bindings[1 + kMaxTex] = {};
 
   bindings[0].binding = 0;
   bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   bindings[0].descriptorCount = 1;
   bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
-  bindings[1].binding = 1;
-  bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-  bindings[1].descriptorCount = 1;
-  bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  for (uint32_t i = 0; i < kMaxTex; i++) {
+    bindings[1 + i].binding = 1 + i;
+    bindings[1 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1 + i].descriptorCount = 1;
+    bindings[1 + i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  }
 
   VkDescriptorSetLayoutCreateInfo dslInfo = {};
   dslInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  dslInfo.bindingCount = 2;
+  dslInfo.bindingCount = 1 + kMaxTex;
   dslInfo.pBindings = bindings;
   vkCreateDescriptorSetLayout(dev, &dslInfo, nullptr, &m_descSetLayout);
 
-  // Create descriptor pool: 4 UBOs + 4 samplers
+  // Descriptor pool: 4 UBOs + 8 samplers per set, 4 sets
   VkDescriptorPoolSize poolSizes[2] = {};
   poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   poolSizes[0].descriptorCount = 4;
   poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-  poolSizes[1].descriptorCount = 4;
+  poolSizes[1].descriptorCount = 8 * 4;
 
   VkDescriptorPoolCreateInfo poolInfo = {};
   poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -92,6 +95,8 @@ void D3D11DeviceContext::updateAndBindDescriptors() {
   auto& vk = m_device->getVulkanDevice();
   auto dev = vk.getDevice();
 
+  static constexpr uint32_t kMaxTex = 8;
+
   // Update binding 0: VS constant buffer (slot 0)
   VkDescriptorBufferInfo bufferInfo = {};
   if (m_vsConstantBuffers[0].buffer) {
@@ -101,34 +106,12 @@ void D3D11DeviceContext::updateAndBindDescriptors() {
     bufferInfo.range = cb->desc.ByteWidth;
   }
 
-  // Update binding 1: PS texture 0 (first bound SRV)
-  VkDescriptorImageInfo imageInfo = {};
-  imageInfo.sampler = VK_NULL_HANDLE;
-  imageInfo.imageView = VK_NULL_HANDLE;
-  imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  // Collect all active texture bindings
+  VkWriteDescriptorSet writes[1 + kMaxTex] = {};
+  VkDescriptorImageInfo imageInfos[kMaxTex] = {};
+  uint32_t writeCount = 1;
 
-  if (m_psShaderResources[0]) {
-    ID3D11Resource* resource = nullptr;
-    m_psShaderResources[0]->GetResource(&resource);
-    if (resource) {
-      D3D11_RESOURCE_DIMENSION dim;
-      resource->GetType(&dim);
-      if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-        auto* tex = static_cast<D3D11Texture2DImpl*>(resource);
-        if (tex->vkImage.view != VK_NULL_HANDLE) {
-          imageInfo.imageView = tex->vkImage.view;
-          // Use default sampler
-          imageInfo.sampler = VK_NULL_HANDLE;
-        }
-      }
-      resource->Release();
-    }
-  }
-
-  // If no texture bound, skip image update but still bind UBO
-  VkWriteDescriptorSet writes[2] = {};
-  uint32_t writeCount = 1; // Always write UBO
-
+  // Binding 0: UBO
   writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
   writes[0].dstSet = m_descSet;
   writes[0].dstBinding = 0;
@@ -136,14 +119,37 @@ void D3D11DeviceContext::updateAndBindDescriptors() {
   writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   writes[0].pBufferInfo = &bufferInfo;
 
-  if (imageInfo.imageView != VK_NULL_HANDLE) {
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = m_descSet;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].pImageInfo = &imageInfo;
-    writeCount = 2;
+  // Bindings 1-8: PS textures (from SRV slots 0-7)
+  for (uint32_t i = 0; i < kMaxTex; i++) {
+    VkDescriptorImageInfo& img = imageInfos[i];
+    img.sampler = VK_NULL_HANDLE;
+    img.imageView = VK_NULL_HANDLE;
+    img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    if (m_psShaderResources[i]) {
+      ID3D11Resource* resource = nullptr;
+      m_psShaderResources[i]->GetResource(&resource);
+      if (resource) {
+        D3D11_RESOURCE_DIMENSION dim;
+        resource->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+          auto* tex = static_cast<D3D11Texture2DImpl*>(resource);
+          if (tex->vkImage.view != VK_NULL_HANDLE) {
+            img.imageView = tex->vkImage.view;
+          }
+        }
+        resource->Release();
+      }
+    }
+
+    // Always write descriptor (even with null imageView — avoids validation errors)
+    writes[writeCount].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[writeCount].dstSet = m_descSet;
+    writes[writeCount].dstBinding = 1 + i;
+    writes[writeCount].descriptorCount = 1;
+    writes[writeCount].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[writeCount].pImageInfo = &img;
+    writeCount++;
   }
 
   vkUpdateDescriptorSets(dev, writeCount, writes, 0, nullptr);
@@ -154,8 +160,8 @@ void D3D11DeviceContext::updateAndBindDescriptors() {
 
   m_descSetDirty = false;
 
-  VKWIND11_LOG_TRACE("Descriptors bound: buffer=%p imageView=%p",
-    bufferInfo.buffer, imageInfo.imageView);
+  VKWIND11_LOG_TRACE("Descriptors bound: buffer=%p, %u texture writes",
+    bufferInfo.buffer, writeCount - 1);
 }
 
 D3D11DeviceContext::~D3D11DeviceContext() {

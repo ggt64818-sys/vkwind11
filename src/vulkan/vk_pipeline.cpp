@@ -127,20 +127,27 @@ VkPipeline VulkanPipelineManager::createPipelineInternal(const PipelineKey& key,
     return VK_NULL_HANDLE;
   }
 
-  // Descriptor set layout
-  VkDescriptorSetLayoutBinding bindings[2] = {};
+  // Descriptor set layout — support up to 8 textures (D3D11 max simultaneous)
+  // Binding 0: UBO (vertex stage)
+  // Binding 1-8: combined image samplers (fragment stage) for textures 0-7
+  static constexpr uint32_t kMaxTextures = 8;
+  VkDescriptorSetLayoutBinding bindings[1 + kMaxTextures] = {};
+
   bindings[0].binding = 0;
   bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   bindings[0].descriptorCount = 1;
   bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-  bindings[1].binding = 1;
-  bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-  bindings[1].descriptorCount = 1;
-  bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+  for (uint32_t i = 0; i < kMaxTextures; i++) {
+    bindings[1 + i].binding = 1 + i;
+    bindings[1 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1 + i].descriptorCount = 1;
+    bindings[1 + i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  }
 
   VkDescriptorSetLayoutCreateInfo dslInfo = {};
   dslInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  dslInfo.bindingCount = 2;
+  dslInfo.bindingCount = 1 + kMaxTextures;
   dslInfo.pBindings = bindings;
 
   VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
