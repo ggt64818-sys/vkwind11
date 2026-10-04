@@ -170,6 +170,25 @@ private:
   VkPipelineLayout m_currentPipelineLayout = VK_NULL_HANDLE;
   bool m_inRenderPass = false;
 
+  // Descriptor set management
+  VkDescriptorPool m_descPool = VK_NULL_HANDLE;
+  VkDescriptorSetLayout m_descSetLayout = VK_NULL_HANDLE;
+  VkDescriptorSet m_descSet = VK_NULL_HANDLE;
+  bool m_descSetDirty = true;
+  void initDescriptors();
+  void updateAndBindDescriptors();
+
+  // Lazy clear: store clear color, apply at render pass begin (Mali optimization)
+  bool m_clearPending = false;
+  float m_clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  bool m_clearDepth = false;
+  float m_depthClear = 1.0f;
+  uint32_t m_stencilClear = 0;
+
+  // Alpha test (push constants)
+  float m_alphaRef = 0.0f;
+  int32_t m_alphaFunc = 0; // 0=disabled, 1=NEVER..8=ALWAYS
+
   // Pipeline management
   VulkanPipelineManager m_pipelineManager;
 

@@ -6,6 +6,8 @@
 #include <memory>
 #include <vector>
 #include <cstring>
+#include <unordered_map>
+#include <mutex>
 
 // ============================================================================
 // D3D11 Device Implementation
@@ -66,12 +68,21 @@ public:
   void setRenderPass(VkRenderPass rp) { m_vkRenderPass = rp; }
   void setImmediateContext(D3D11DeviceContext* ctx) { m_immediateContext = ctx; }
 
+  // Shader module cache: maps shader object → VkShaderModule
+  // Avoids re-translating SM4→SPIR-V when same shader is set again
+  VkShaderModule getOrCreateShaderModuleFromCache(const void* shaderObj, const std::vector<uint32_t>& spirv);
+  void invalidateShaderModuleCache(const void* shaderObj);
+
 private:
   std::unique_ptr<VulkanDevice> m_vkDevice;
   D3D11DeviceContext* m_immediateContext = nullptr;
   VulkanSwapchain m_vkSwapchain;
   VkRenderPass m_vkRenderPass = VK_NULL_HANDLE;
   std::string m_debugName;
+
+  // Shader module cache (keyed by shader object pointer)
+  std::unordered_map<const void*, VkShaderModule> m_shaderModuleCache;
+  std::mutex m_shaderCacheMutex;
 };
 
 // ============================================================================

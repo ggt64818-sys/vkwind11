@@ -17,6 +17,22 @@ D3D11Device::~D3D11Device() {
     m_immediateContext = nullptr;
   }
 
+  // Destroy shader module cache
+  {
+    std::lock_guard lock(m_shaderCacheMutex);
+    if (m_vkDevice) {
+      auto dev = m_vkDevice->getDevice();
+      if (dev) {
+        for (auto& [shaderObj, module] : m_shaderModuleCache) {
+          if (module != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(dev, module, nullptr);
+          }
+        }
+      }
+    }
+    m_shaderModuleCache.clear();
+  }
+
   // Destroy Vulkan swapchain resources before the device is torn down.
   // unique_ptr<VulkanDevice> is destroyed after these members (declaration order).
   if (m_vkDevice) {
@@ -303,5 +319,47 @@ UINT D3D11Device::CheckFormatSupport(DXGI_FORMAT Format) {
 
 HRESULT D3D11Device::GetDeviceRemovedReason() {
   return S_OK;
+}
+
+// ============================================================================
+// Shader Module Cache
+// ============================================================================
+
+VkShaderModule D3D11Device::getOrCreateShaderModuleFromCache(const void* shaderObj, const std::vector<uint32_t>& spirv) {
+  if (!shaderObj) return VK_NULL_HANDLE;
+
+  // 1. Check cache first (even with empty spirv — just a lookup)
+  {
+    std::lock_guard lock(m_shaderCacheMutex);
+    auto it = m_shaderModuleCache.find(shaderObj);
+    if (it != m_shaderModuleCache.end() && it->second != VK_NULL_HANDLE) {
+      return it->second; // Cache hit — no re-translation
+    }
+  }
+
+  // 2. Cache miss — need spirv to create module
+  if (spirv.empty()) return VK_NULL_HANDLE;
+
+  auto& vk = getVulkanDevice();
+  VkShaderModule module = vk.createShaderModule(spirv.data(), spirv.size() * sizeof(uint32_t));
+  if (module == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+
+  {
+    std::lock_guard lock(m_shaderCacheMutex);
+    m_shaderModuleCache[shaderObj] = module;
+  }
+
+  return module;
+}
+
+void D3D11Device::invalidateShaderModuleCache(const void* shaderObj) {
+  std::lock_guard lock(m_shaderCacheMutex);
+  auto it = m_shaderModuleCache.find(shaderObj);
+  if (it != m_shaderModuleCache.end()) {
+    if (it->second != VK_NULL_HANDLE) {
+      vkDestroyShaderModule(getVulkanDevice().getDevice(), it->second, nullptr);
+    }
+    m_shaderModuleCache.erase(it);
+  }
 }
 

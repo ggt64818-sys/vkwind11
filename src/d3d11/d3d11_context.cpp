@@ -20,9 +20,165 @@ D3D11DeviceContext::D3D11DeviceContext(D3D11Device* device)
   memset(m_psSamplers, 0, sizeof(m_psSamplers));
   memset(m_renderTargets, 0, sizeof(m_renderTargets));
   m_pipelineManager.initialize(m_device->getVulkanDevice().getDevice());
+  initDescriptors();
 }
 
-D3D11DeviceContext::~D3D11DeviceContext() = default;
+// ============================================================================
+// Descriptor Set Management
+// ============================================================================
+
+void D3D11DeviceContext::initDescriptors() {
+  auto& vk = m_device->getVulkanDevice();
+  auto dev = vk.getDevice();
+
+  // Create descriptor set layout matching pipeline layout:
+  // binding 0: UBO (vertex stage)
+  // binding 1: combined image sampler (fragment stage)
+  VkDescriptorSetLayoutBinding bindings[2] = {};
+
+  bindings[0].binding = 0;
+  bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  bindings[0].descriptorCount = 1;
+  bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+  bindings[1].binding = 1;
+  bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  bindings[1].descriptorCount = 1;
+  bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+  VkDescriptorSetLayoutCreateInfo dslInfo = {};
+  dslInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  dslInfo.bindingCount = 2;
+  dslInfo.pBindings = bindings;
+  vkCreateDescriptorSetLayout(dev, &dslInfo, nullptr, &m_descSetLayout);
+
+  // Create descriptor pool: 4 UBOs + 4 samplers
+  VkDescriptorPoolSize poolSizes[2] = {};
+  poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  poolSizes[0].descriptorCount = 4;
+  poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  poolSizes[1].descriptorCount = 4;
+
+  VkDescriptorPoolCreateInfo poolInfo = {};
+  poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  poolInfo.maxSets = 4;
+  poolInfo.poolSizeCount = 2;
+  poolInfo.pPoolSizes = poolSizes;
+  vkCreateDescriptorPool(dev, &poolInfo, nullptr, &m_descPool);
+
+  // Allocate descriptor set
+  VkDescriptorSetAllocateInfo allocInfo = {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  allocInfo.descriptorPool = m_descPool;
+  allocInfo.descriptorSetCount = 1;
+  allocInfo.pSetLayouts = &m_descSetLayout;
+  vkAllocateDescriptorSets(dev, &allocInfo, &m_descSet);
+
+  m_descSetDirty = true;
+
+  VKWIND11_LOG_INFO("Descriptor set initialized: layout=%p pool=%p set=%p",
+    m_descSetLayout, m_descPool, m_descSet);
+}
+
+void D3D11DeviceContext::updateAndBindDescriptors() {
+  if (!m_cmdBuffer || m_descSet == VK_NULL_HANDLE) return;
+  if (!m_descSetDirty) {
+    // Still need to bind (command buffer changes each frame)
+    vkCmdBindDescriptorSets(m_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_currentPipelineLayout, 0, 1, &m_descSet, 0, nullptr);
+    return;
+  }
+
+  auto& vk = m_device->getVulkanDevice();
+  auto dev = vk.getDevice();
+
+  // Update binding 0: VS constant buffer (slot 0)
+  VkDescriptorBufferInfo bufferInfo = {};
+  if (m_vsConstantBuffers[0].buffer) {
+    auto* cb = static_cast<D3D11BufferImpl*>(m_vsConstantBuffers[0].buffer);
+    bufferInfo.buffer = cb->vkBuffer.buffer;
+    bufferInfo.offset = 0;
+    bufferInfo.range = cb->desc.ByteWidth;
+  }
+
+  // Update binding 1: PS texture 0 (first bound SRV)
+  VkDescriptorImageInfo imageInfo = {};
+  imageInfo.sampler = VK_NULL_HANDLE;
+  imageInfo.imageView = VK_NULL_HANDLE;
+  imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+  if (m_psShaderResources[0]) {
+    ID3D11Resource* resource = nullptr;
+    m_psShaderResources[0]->GetResource(&resource);
+    if (resource) {
+      D3D11_RESOURCE_DIMENSION dim;
+      resource->GetType(&dim);
+      if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        auto* tex = static_cast<D3D11Texture2DImpl*>(resource);
+        if (tex->vkImage.view != VK_NULL_HANDLE) {
+          imageInfo.imageView = tex->vkImage.view;
+          // Use default sampler
+          imageInfo.sampler = VK_NULL_HANDLE;
+        }
+      }
+      resource->Release();
+    }
+  }
+
+  // If no texture bound, skip image update but still bind UBO
+  VkWriteDescriptorSet writes[2] = {};
+  uint32_t writeCount = 1; // Always write UBO
+
+  writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  writes[0].dstSet = m_descSet;
+  writes[0].dstBinding = 0;
+  writes[0].descriptorCount = 1;
+  writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  writes[0].pBufferInfo = &bufferInfo;
+
+  if (imageInfo.imageView != VK_NULL_HANDLE) {
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = m_descSet;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].pImageInfo = &imageInfo;
+    writeCount = 2;
+  }
+
+  vkUpdateDescriptorSets(dev, writeCount, writes, 0, nullptr);
+
+  // Bind descriptor set to command buffer
+  vkCmdBindDescriptorSets(m_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_currentPipelineLayout, 0, 1, &m_descSet, 0, nullptr);
+
+  m_descSetDirty = false;
+
+  VKWIND11_LOG_TRACE("Descriptors bound: buffer=%p imageView=%p",
+    bufferInfo.buffer, imageInfo.imageView);
+}
+
+D3D11DeviceContext::~D3D11DeviceContext() {
+  // Clean up descriptor resources
+  if (m_device) {
+    auto& vk = m_device->getVulkanDevice();
+    auto dev = vk.getDevice();
+    if (dev) {
+      if (m_descSet) {
+        vkFreeDescriptorSets(dev, m_descPool, 1, &m_descSet);
+        m_descSet = VK_NULL_HANDLE;
+      }
+      if (m_descPool) {
+        vkDestroyDescriptorPool(dev, m_descPool, nullptr);
+        m_descPool = VK_NULL_HANDLE;
+      }
+      if (m_descSetLayout) {
+        vkDestroyDescriptorSetLayout(dev, m_descSetLayout, nullptr);
+        m_descSetLayout = VK_NULL_HANDLE;
+      }
+    }
+  }
+}
 
 HRESULT D3D11DeviceContext::QueryInterface(REFIID riid, void** ppvObject) {
   if (!ppvObject) return E_POINTER;
@@ -48,11 +204,8 @@ void D3D11DeviceContext::GetDevice(ID3D11Device** ppDevice) {
 
 void D3D11DeviceContext::VSSetShader(ID3D11VertexShader* pVertexShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances) {
   if (m_vs != pVertexShader) {
-    // Shader changed — invalidate cached module
-    if (m_vsModule != VK_NULL_HANDLE) {
-      vkDestroyShaderModule(m_device->getVulkanDevice().getDevice(), m_vsModule, nullptr);
-      m_vsModule = VK_NULL_HANDLE;
-    }
+    // Shader changed — clear local cache pointer (device-level cache manages lifetime)
+    m_vsModule = VK_NULL_HANDLE;
     m_currentPipeline = VK_NULL_HANDLE;
   }
   m_vs = pVertexShader;
@@ -65,6 +218,7 @@ void D3D11DeviceContext::VSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, I
       m_vsConstantBuffers[StartSlot + i].buffer = ppConstantBuffers[i];
     }
   }
+  m_descSetDirty = true;
 }
 
 void D3D11DeviceContext::VSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews) {
@@ -95,11 +249,8 @@ void D3D11DeviceContext::VSGetShader(ID3D11VertexShader** ppVertexShader, ID3D11
 
 void D3D11DeviceContext::PSSetShader(ID3D11PixelShader* pPixelShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances) {
   if (m_ps != pPixelShader) {
-    // Shader changed — invalidate cached module
-    if (m_psModule != VK_NULL_HANDLE) {
-      vkDestroyShaderModule(m_device->getVulkanDevice().getDevice(), m_psModule, nullptr);
-      m_psModule = VK_NULL_HANDLE;
-    }
+    // Shader changed — clear local cache pointer (device-level cache manages lifetime)
+    m_psModule = VK_NULL_HANDLE;
     m_currentPipeline = VK_NULL_HANDLE;
   }
   m_ps = pPixelShader;
@@ -112,6 +263,7 @@ void D3D11DeviceContext::PSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, I
       m_psConstantBuffers[StartSlot + i].buffer = ppConstantBuffers[i];
     }
   }
+  m_descSetDirty = true;
 }
 
 void D3D11DeviceContext::PSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews) {
@@ -120,6 +272,7 @@ void D3D11DeviceContext::PSSetShaderResources(UINT StartSlot, UINT NumViews, ID3
       m_psShaderResources[StartSlot + i] = ppShaderResourceViews[i];
     }
   }
+  m_descSetDirty = true;
 }
 
 void D3D11DeviceContext::PSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers) {
@@ -227,6 +380,15 @@ void D3D11DeviceContext::Draw(UINT VertexCount, UINT StartVertexLocation) {
   bindGraphicsPipeline();
   if (m_currentPipeline == VK_NULL_HANDLE) return;
 
+  // Update and bind descriptor set (textures + constant buffers)
+  updateAndBindDescriptors();
+
+  // Push constants: alpha test state
+  struct AlphaPC { float alphaRef; int32_t alphaFunc; };
+  AlphaPC pc = { m_alphaRef, m_alphaFunc };
+  vkCmdPushConstants(m_cmdBuffer, m_currentPipelineLayout,
+                     VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+
   // Bind vertex buffers
   for (UINT i = 0; i < 32; i++) {
     if (m_vertexBuffers[i].buffer) {
@@ -248,6 +410,15 @@ void D3D11DeviceContext::DrawIndexed(UINT IndexCount, UINT StartIndexLocation, I
   if (!m_inRenderPass) return;
   bindGraphicsPipeline();
   if (m_currentPipeline == VK_NULL_HANDLE) return;
+
+  // Update and bind descriptor set (textures + constant buffers)
+  updateAndBindDescriptors();
+
+  // Push constants: alpha test state
+  struct AlphaPC { float alphaRef; int32_t alphaFunc; };
+  AlphaPC pc = { m_alphaRef, m_alphaFunc };
+  vkCmdPushConstants(m_cmdBuffer, m_currentPipelineLayout,
+                     VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 
   // Bind vertex buffers
   for (UINT i = 0; i < 32; i++) {
@@ -514,20 +685,19 @@ void D3D11DeviceContext::RSGetScissorRects(UINT* pNumRects, D3D11_RECT* pRects) 
 void D3D11DeviceContext::ClearRenderTargetView(ID3D11RenderTargetView* pRenderTargetView, const float ColorRGBA[4]) {
   VKWIND11_LOG_TRACE("ClearRenderTargetView");
   if (!pRenderTargetView || !ColorRGBA) return;
-  if (m_cmdBuffer == VK_NULL_HANDLE) return;
-  VkClearColorValue clearColor = {};
-  clearColor.float32[0] = ColorRGBA[0];
-  clearColor.float32[1] = ColorRGBA[1];
-  clearColor.float32[2] = ColorRGBA[2];
-  clearColor.float32[3] = ColorRGBA[3];
-  VkImageSubresourceRange range = {};
-  range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  range.baseMipLevel = 0;
-  range.levelCount = 1;
-  range.baseArrayLayer = 0;
-  range.layerCount = 1;
-  // TODO: resolve the RTV to VkImage, vkCmdClearColorImage or use render pass load-op clear
-  // For now this is a placeholder that validates inputs are captured correctly.
+
+  // Store clear color for lazy application at next render pass begin
+  m_clearColor[0] = ColorRGBA[0];
+  m_clearColor[1] = ColorRGBA[1];
+  m_clearColor[2] = ColorRGBA[2];
+  m_clearColor[3] = ColorRGBA[3];
+  m_clearPending = true;
+
+  // If render pass is active, end it so next begin uses new clear color
+  if (m_inRenderPass && m_cmdBuffer) {
+    vkCmdEndRenderPass(m_cmdBuffer);
+    m_inRenderPass = false;
+  }
 }
 
 void D3D11DeviceContext::ClearDepthStencilView(ID3D11DepthStencilView* pDepthStencilView, UINT ClearFlags, float Depth, UINT8 Stencil) {
@@ -559,6 +729,8 @@ void D3D11DeviceContext::ClearState() {
   m_numScissorRects = 0;
   m_currentPipeline = VK_NULL_HANDLE;
   m_currentPipelineLayout = VK_NULL_HANDLE;
+  m_vsModule = VK_NULL_HANDLE;
+  m_psModule = VK_NULL_HANDLE;
   m_boundVS = nullptr;
   m_boundPS = nullptr;
 }
@@ -638,8 +810,15 @@ void D3D11DeviceContext::beginRenderPassIfNeeded() {
     }
   }
 
+  // Use stored clear color (lazy clear optimization for Mali)
   VkClearValue clearColor{};
-  clearColor.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  if (m_clearPending) {
+    clearColor.color = {{m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3]}};
+    m_clearPending = false;
+  } else {
+    // No clear requested — use LOAD_OP_DONT_CARE equivalent (still need a value)
+    clearColor.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  }
 
   VkRenderPassBeginInfo rpBegin{};
   rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -691,6 +870,16 @@ VkShaderModule D3D11DeviceContext::getOrCreateVertexShaderModule() {
   if (m_vsModule != VK_NULL_HANDLE) return m_vsModule;
   if (!m_vs) return VK_NULL_HANDLE;
 
+  // Check device-level cache first (avoids re-translation)
+  auto* dev = m_device;
+  VkShaderModule cached = dev->getOrCreateShaderModuleFromCache(m_vs, {});
+  if (cached != VK_NULL_HANDLE) {
+    m_vsModule = cached;
+    m_boundVS = m_vs;
+    return m_vsModule;
+  }
+
+  // Translate DXBC → SPIR-V
   auto* vs = static_cast<D3D11VertexShader*>(m_vs);
   SM4Translator translator;
   SM4TranslateResult result = translator.translate(vs->getDXBC());
@@ -700,9 +889,8 @@ VkShaderModule D3D11DeviceContext::getOrCreateVertexShaderModule() {
     return VK_NULL_HANDLE;
   }
 
-  auto& vk = m_device->getVulkanDevice();
-  m_vsModule = vk.createShaderModule(result.spirvWords.data(),
-                                     result.spirvWords.size() * sizeof(uint32_t));
+  // Store in device-level cache
+  m_vsModule = dev->getOrCreateShaderModuleFromCache(m_vs, result.spirvWords);
   m_boundVS = m_vs;
 
   VKWIND11_LOG_TRACE("getOrCreateVertexShaderModule: created VkShaderModule %p", m_vsModule);
@@ -713,6 +901,16 @@ VkShaderModule D3D11DeviceContext::getOrCreatePixelShaderModule() {
   if (m_psModule != VK_NULL_HANDLE) return m_psModule;
   if (!m_ps) return VK_NULL_HANDLE;
 
+  // Check device-level cache first (avoids re-translation)
+  auto* dev = m_device;
+  VkShaderModule cached = dev->getOrCreateShaderModuleFromCache(m_ps, {});
+  if (cached != VK_NULL_HANDLE) {
+    m_psModule = cached;
+    m_boundPS = m_ps;
+    return m_psModule;
+  }
+
+  // Translate DXBC → SPIR-V
   auto* ps = static_cast<D3D11PixelShader*>(m_ps);
   SM4Translator translator;
   SM4TranslateResult result = translator.translate(ps->getDXBC());
@@ -722,9 +920,8 @@ VkShaderModule D3D11DeviceContext::getOrCreatePixelShaderModule() {
     return VK_NULL_HANDLE;
   }
 
-  auto& vk = m_device->getVulkanDevice();
-  m_psModule = vk.createShaderModule(result.spirvWords.data(),
-                                     result.spirvWords.size() * sizeof(uint32_t));
+  // Store in device-level cache
+  m_psModule = dev->getOrCreateShaderModuleFromCache(m_ps, result.spirvWords);
   m_boundPS = m_ps;
 
   VKWIND11_LOG_TRACE("getOrCreatePixelShaderModule: created VkShaderModule %p", m_psModule);
@@ -793,52 +990,55 @@ void D3D11DeviceContext::bindGraphicsPipeline() {
     key.blendEnable = false;
   }
 
-  // Vertex input from input layout
+  // Vertex input from input layout — fixed arrays, no heap
   if (m_inputLayout) {
     auto* layout = static_cast<D3D11InputLayoutImpl*>(m_inputLayout);
     auto& elements = layout->getElements();
 
-    uint32_t bindingSlot = 0;
+    uint32_t bindingCount = 0;
+    uint32_t attrCount = 0;
+
     for (auto& elem : elements) {
-      // Find matching vertex buffer for this semantic
-      if (elem.InputSlot != bindingSlot) {
-        bindingSlot = elem.InputSlot;
+      // Add binding if not already present
+      bool bindingFound = false;
+      for (uint32_t b = 0; b < bindingCount; b++) {
+        if (key.vertexBindings[b].binding == elem.InputSlot) { bindingFound = true; break; }
+      }
+      if (!bindingFound && bindingCount < kMaxVertexBindings) {
+        key.vertexBindings[bindingCount].binding = elem.InputSlot;
+        key.vertexBindings[bindingCount].stride = m_vertexBuffers[elem.InputSlot].stride;
+        key.vertexBindings[bindingCount].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        bindingCount++;
       }
 
-      VkVertexInputBindingDescription binding{};
-      binding.binding = elem.InputSlot;
-      binding.stride = m_vertexBuffers[elem.InputSlot].stride;
-      binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+      // Add attribute
+      if (attrCount < kMaxVertexAttributes) {
+        auto& attr = key.vertexAttributes[attrCount];
+        attr.location = (uint32_t)elem.SemanticIndex;
+        attr.binding = elem.InputSlot;
+        attr.offset = elem.AlignedByteOffset;
 
-      // Avoid duplicate bindings
-      bool found = false;
-      for (auto& b : key.vertexBindings) {
-        if (b.binding == binding.binding) { found = true; break; }
+        switch (elem.Format) {
+          case DXGI_FORMAT_R32G32B32A32_FLOAT: attr.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
+          case DXGI_FORMAT_R32G32B32_FLOAT:    attr.format = VK_FORMAT_R32G32B32_SFLOAT; break;
+          case DXGI_FORMAT_R32_FLOAT:          attr.format = VK_FORMAT_R32_SFLOAT; break;
+          case DXGI_FORMAT_R8G8B8A8_UNORM:     attr.format = VK_FORMAT_R8G8B8A8_UNORM; break;
+          case DXGI_FORMAT_R16G16_FLOAT:       attr.format = VK_FORMAT_R16G16_SFLOAT; break;
+          case DXGI_FORMAT_R16_FLOAT:          attr.format = VK_FORMAT_R16_SFLOAT; break;
+          default:                             attr.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
+        }
+        attrCount++;
       }
-      if (!found) key.vertexBindings.push_back(binding);
-
-      VkVertexInputAttributeDescription attr{};
-      attr.location = (uint32_t)elem.SemanticIndex;
-      attr.binding = elem.InputSlot;
-      attr.offset = elem.AlignedByteOffset;
-
-      switch (elem.Format) {
-        case DXGI_FORMAT_R32G32B32A32_FLOAT: attr.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
-        case DXGI_FORMAT_R32G32B32_FLOAT:    attr.format = VK_FORMAT_R32G32B32_SFLOAT; break;
-        case DXGI_FORMAT_R32_FLOAT:          attr.format = VK_FORMAT_R32_SFLOAT; break;
-        case DXGI_FORMAT_R8G8B8A8_UNORM:     attr.format = VK_FORMAT_R8G8B8A8_UNORM; break;
-        case DXGI_FORMAT_R16G16_FLOAT:       attr.format = VK_FORMAT_R16G16_SFLOAT; break;
-        case DXGI_FORMAT_R16_FLOAT:          attr.format = VK_FORMAT_R16_SFLOAT; break;
-        default:                             attr.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
-      }
-
-      key.vertexAttributes.push_back(attr);
     }
+
+    key.numBindings = bindingCount;
+    key.numAttributes = attrCount;
   }
 
-  VkPipeline pipeline = m_pipelineManager.getOrCreateGraphicsPipeline(key);
+  VkPipeline pipeline = m_pipelineManager.getOrCreateGraphicsPipelineAsync(key);
   if (pipeline == VK_NULL_HANDLE) {
-    VKWIND11_LOG_WARN("bindGraphicsPipeline: failed to create/get pipeline");
+    // Pipeline still compiling — skip this draw to avoid hitching
+    VKWIND11_LOG_TRACE("bindGraphicsPipeline: async pipeline not ready, skipping draw");
     return;
   }
 
